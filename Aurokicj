@@ -1,0 +1,88 @@
+from datetime import datetime, timedelta
+from telethon import TelegramClient
+from telethon.tl.custom import Message
+from telethon.tl.types import ChannelParticipantsAdmins
+from .. import loader, utils
+
+@loader.tds
+class AutoKickMod(loader.Module):
+    """Автоматически кикает участников чата, которые не писали сообщения определённое время"""
+
+    strings = {
+        "name": "AutoKick",
+        "start_kick": "✅ Автокик включён для этого чата.",
+        "stop_kick": "🛑 Автокик выключен для этого чата.",
+        "set_time": "⏱️ Время бездействия установлено: {days} дней.",
+        "not_tracking": "ℹ️ Автокик для этого чата не был включён.",
+        "kicked_user": "👢 Кикнут пользователь {user}, не писал {days} дней.",
+        "no_permission": "🚫 У бота нет прав администратора для кика.",
+        "error": "⚠️ Произошла ошибка: {error}",
+    }
+
+    async def client_ready(self, client: TelegramClient, db):
+        self.client = client
+        self.db = db
+
+    def set(self, key, value):
+        return self.db.set(self.strings("name"), key, value)
+
+    def get(self, key, default=None):
+        return self.db.get(self.strings("name"), key, default)
+
+    async def startkickcmd(self, message: Message):
+        """Включить автокик в этом чате"""
+        tracked = self.get("autokick_chats", [])
+        if message.chat_id not in tracked:
+            tracked.append(message.chat_id)
+            self.set("autokick_chats", tracked)
+        await utils.answer(message, self.strings("start_kick"))
+
+    async def stopkickcmd(self, message: Message):
+        """Выключить автокик в этом чате"""
+        tracked = self.get("autokick_chats", [])
+        if message.chat_id in tracked:
+            tracked.remove(message.chat_id)
+            self.set("autokick_chats", tracked)
+            await utils.answer(message, self.strings("stop_kick"))
+        else:
+            await utils.answer(message, self.strings("not_tracking"))
+
+    async def settimecmd(self, message: Message):
+        """Установить время бездействия (в днях) для кика"""
+        args = utils.get_args(message)
+        if not args or not args[0].isdigit():
+            return await utils.answer(message, "❗ Укажите количество дней. Пример: .установитьвремя 5")
+        days = int(args[0])
+        self.set(f"time_{message.chat_id}", days)
+        await utils.answer(message, self.strings("set_time").format(days=days))
+
+    @loader.loop(interval=3600) 
+    async def auto_kick_loop(self):
+        tracked = self.get("autokick_chats", [])
+        for chat_id in tracked:
+            try:
+                days_limit = self.get(f"time_{chat_id}", 7)
+                cutoff_date = datetime.utcnow() - timedelta(days=days_limit)
+
+                async for user in self.client.iter_participants(chat_id):
+                    if user.bot or user.deleted:
+                        continue
+
+                    last_msg = None
+                    async for msg in self.client.iter_messages(chat_id, from_user=user.id, limit=1):
+                        last_msg = msg
+                        break
+
+                    if not last_msg or last_msg.date.replace(tzinfo=None) < cutoff_date:
+                        me = await self.client.get_me()
+                        perms = await self.client.get_permissions(chat_id, me)
+                        if not perms.is_admin or not perms.delete_messages:
+                            continue
+                        try:
+                            await self.client.kick_participant(chat_id, user.id)
+                            print(f"[AutoKick] Кикнут пользователь {user.id} из чата {chat_id}")
+                        except Exception as e:
+                            print(f"[AutoKick] Ошибка при кике {user.id}: {e}")
+
+            except Exception as e:
+                print(f"[AutoKick] Ошибка автокика в чате {chat_id}: {e}")
